@@ -459,11 +459,23 @@ class FFmpegGUI:
         config.set_last_directory("video", path)
         config.add_recent_file(path)
         
-        self.log_display.add_log(f"选择视频文件: {os.path.basename(path)}")
+        # 处理长文件名显示
+        filename = os.path.basename(path)
+        if len(filename) > 50:
+            display_name = filename[:47] + "..."
+            self.log_display.add_log(f"选择视频文件: {display_name}")
+            self.log_display.add_log(f"完整路径: {path}", "INFO")
+        else:
+            self.log_display.add_log(f"选择视频文件: {filename}")
+        
+        # 检查文件名长度和特殊字符
+        if len(path) > 260:
+            self.log_display.add_log("注意: 文件路径很长，如果处理出错请考虑移动到较短路径", "WARNING")
         
         # 获取视频信息
         if self.ffmpeg_manager.is_valid:
             def get_info_thread():
+                self.log_display.add_log("正在获取视频信息...")
                 info = self.ffmpeg_manager.get_video_info(path)
                 
                 def update_ui():
@@ -471,12 +483,25 @@ class FFmpegGUI:
                     self.video_info.update_info(info)
                     
                     # 设置视频总时长用于进度计算
-                    if info.get("duration"):
+                    if info.get("duration") and info.get("duration") != "未知":
                         self.video_processor.set_total_duration(info["duration"])
+                        self.log_display.add_log(f"视频时长: {info['duration']}")
+                    else:
+                        self.log_display.add_log("视频信息获取完成 (部分信息可能不可用)", "WARNING")
                 
                 self.root.after(0, update_ui)
             
             threading.Thread(target=get_info_thread, daemon=True).start()
+        else:
+            self.video_info.update_info({
+                "duration": "需要FFmpeg", 
+                "resolution": "需要FFmpeg",
+                "video_codec": "需要FFmpeg",
+                "audio_codec": "需要FFmpeg",
+                "bitrate": "需要FFmpeg",
+                "frame_rate": "需要FFmpeg",
+                "file_size": self._get_file_size_fallback(path)
+            })
     
     def _on_mode_changed(self):
         """功能模式变更回调"""
@@ -620,6 +645,15 @@ class FFmpegGUI:
         config.set_last_directory("output", output_dir)
         self.log_display.add_log(f"输出文件: {output_name}")
         
+        # 显示实际的FFmpeg命令（调试用）
+        self.log_display.add_log(f"GPU模式: {gpu_mode}")
+        cmd_str = " ".join(command)
+        if len(cmd_str) > 200:
+            cmd_display = cmd_str[:197] + "..."
+        else:
+            cmd_display = cmd_str
+        self.log_display.add_log(f"FFmpeg命令: {cmd_display}")
+        
         return command
     
     def _set_processing_state(self, processing: bool):
@@ -699,6 +733,18 @@ class FFmpegGUI:
         
         messagebox.showinfo("FFmpeg信息", info_text)
     
+    def _get_file_size_fallback(self, file_path: str) -> str:
+        """备用文件大小获取方法"""
+        try:
+            size_bytes = os.path.getsize(file_path)
+            for unit in ['B', 'KB', 'MB', 'GB']:
+                if size_bytes < 1024.0:
+                    return f"{size_bytes:.1f} {unit}"
+                size_bytes /= 1024.0
+            return f"{size_bytes:.1f} TB"
+        except Exception:
+            return "未知"
+    
     def _show_about(self):
         """显示关于信息"""
         about_text = """FFmpeg视频处理工具
@@ -708,9 +754,10 @@ class FFmpegGUI:
 • 字幕烧录 - 将字幕嵌入视频
 • GPU加速 - 支持NVIDIA CUDA和AMD硬件加速
 • 智能检测 - 自动检测FFmpeg和GPU支持
+• 长文件名支持 - 处理包含中文和特殊字符的文件
 
 开发语言: Python + Tkinter
-版本: 1.0.0"""
+版本: 1.1.0 - 高级GPU优化版"""
         
         messagebox.showinfo("关于", about_text)
     

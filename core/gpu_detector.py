@@ -292,25 +292,45 @@ class GPUDetector:
         else:
             return "cpu"
     
-    def get_gpu_acceleration_args(self, mode: str) -> List[str]:
+    def get_gpu_acceleration_args(self, mode: str, advanced: bool = True) -> List[str]:
         """
         获取GPU加速参数
         
         Args:
             mode: GPU模式 (cuda, amd, cpu)
+            advanced: 是否使用高级优化参数
             
         Returns:
             FFmpeg参数列表
         """
         if mode == "cuda" and self.ffmpeg_gpu_support.get("cuda", False):
-            return ["-hwaccel", "cuda"]
+            if advanced:
+                # 高级CUDA参数：更好的性能和兼容性
+                return ["-y", "-vsync", "0", "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+            else:
+                return ["-hwaccel", "cuda"]
+                
         elif mode == "amd":
-            if self.ffmpeg_gpu_support.get("opencl", False):
-                return ["-hwaccel", "opencl"]
-            elif self.system == "windows" and self.ffmpeg_gpu_support.get("d3d11va", False):
-                return ["-hwaccel", "d3d11va"]
+            if advanced:
+                # 高级AMD参数
+                if self.system == "windows" and self.ffmpeg_gpu_support.get("dxva2", False):
+                    return ["-y", "-vsync", "0", "-hwaccel", "dxva2"]
+                elif self.ffmpeg_gpu_support.get("opencl", False):
+                    return ["-y", "-vsync", "0", "-hwaccel", "opencl"]
+                else:
+                    return ["-y", "-vsync", "0"]  # 基本优化参数
+            else:
+                # 基础AMD参数
+                if self.ffmpeg_gpu_support.get("opencl", False):
+                    return ["-hwaccel", "opencl"]
+                elif self.system == "windows" and self.ffmpeg_gpu_support.get("dxva2", False):
+                    return ["-hwaccel", "dxva2"]
         
-        return []  # CPU模式或不支持GPU加速
+        elif advanced:
+            # CPU模式但使用基本优化
+            return ["-y", "-vsync", "0"]
+        
+        return []  # CPU模式无优化
     
     def get_gpu_encoder(self, mode: str, codec: str = "h264") -> Optional[str]:
         """

@@ -115,6 +115,11 @@ class FFmpegManager:
             self.ffmpeg_path = path
             self.is_valid = True
             self._get_version_info()
+            
+            # 重要：设置FFmpeg路径后，检测GPU支持
+            self.gpu_detector.detect_gpus()
+            self.gpu_detector.check_ffmpeg_gpu_support(path)
+            
             return True
         else:
             self.ffmpeg_path = ""
@@ -162,16 +167,21 @@ class FFmpegManager:
             return {}
         
         try:
+            # 处理长文件名和特殊字符
+            # 在Windows上，如果路径太长或包含特殊字符，使用短路径或引号包装
+            safe_video_path = self._make_safe_path(video_path)
+            
             cmd = [
-                self.ffmpeg_path, "-i", video_path,
-                "-hide_banner", "-f", "null", "-"
+                self.ffmpeg_path, "-i", safe_video_path,
+                "-hide_banner", "-f", "null", "-",
+                "-v", "quiet"  # 减少输出，提高性能
             ]
             
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=15,  # 减少超时时间
                 encoding='utf-8',
                 errors='ignore'
             )
@@ -191,6 +201,18 @@ class FFmpegManager:
             
             return info
         
+        except subprocess.TimeoutExpired:
+            print(f"获取视频信息超时: 文件名可能过长或包含特殊字符")
+            # 返回基本信息
+            return {
+                "duration": "未知",
+                "resolution": "未知", 
+                "video_codec": "未知",
+                "audio_codec": "未知",
+                "bitrate": "未知",
+                "frame_rate": "未知",
+                "file_size": self._get_file_size(video_path)
+            }
         except Exception as e:
             print(f"获取视频信息失败: {e}")
             return {}
@@ -233,6 +255,51 @@ class FFmpegManager:
         except Exception:
             return "未知"
     
+    def _make_safe_path(self, file_path: str) -> str:
+        """
+        创建安全的文件路径，处理长文件名和特殊字符
+        
+        Args:
+            file_path: 原始文件路径
+            
+        Returns:
+            安全的文件路径
+        """
+        try:
+            # 标准化路径
+            normalized_path = os.path.normpath(file_path)
+            
+            # Windows系统特殊处理
+            if os.name == 'nt':
+                # 检查路径长度
+                if len(normalized_path) > 260:
+                    try:
+                        # 尝试获取短路径名
+                        import ctypes
+                        from ctypes import wintypes
+                        
+                        GetShortPathNameW = ctypes.windll.kernel32.GetShortPathNameW
+                        GetShortPathNameW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+                        GetShortPathNameW.restype = wintypes.DWORD
+                        
+                        buffer_size = 500
+                        buffer = ctypes.create_unicode_buffer(buffer_size)
+                        result = GetShortPathNameW(normalized_path, buffer, buffer_size)
+                        
+                        if result > 0:
+                            return buffer.value
+                    except Exception:
+                        pass
+                
+                # 对于包含Unicode字符的路径，保持原样
+                # subprocess.run() 会正确处理Unicode路径
+            
+            return normalized_path
+            
+        except Exception as e:
+            print(f"路径安全化失败: {e}")
+            return file_path
+    
     def build_cut_command(self, 
                          input_file: str,
                          output_file: str,
@@ -259,15 +326,16 @@ class FFmpegManager:
         
         cmd = [self.ffmpeg_path]
         
-        # 添加GPU加速参数
-        gpu_args = self.gpu_detector.get_gpu_acceleration_args(gpu_mode)
+        # 添加GPU加速参数（包含高级优化）
+        gpu_args = self.gpu_detector.get_gpu_acceleration_args(gpu_mode, advanced=True)
         cmd.extend(gpu_args)
         
-        # 输入文件
-        cmd.extend(["-i", input_file])
-        
-        # 时间参数
+        # 时间参数（在输入文件之前，更高效的seeking）
         cmd.extend(["-ss", start_time, "-to", end_time])
+        
+        # 输入文件 - 使用安全路径
+        safe_input_file = self._make_safe_path(input_file)
+        cmd.extend(["-i", safe_input_file])
         
         # 编码器设置
         video_encoder = self.gpu_detector.get_gpu_encoder(gpu_mode, "h264")
@@ -283,11 +351,9 @@ class FFmpegManager:
         # 音频编码
         cmd.extend(["-c:a", "copy"])  # 复制音频，不重新编码
         
-        # 其他参数
-        cmd.extend(["-avoid_negative_ts", "make_zero"])
-        
-        # 输出文件
-        cmd.append(output_file)
+        # 输出文件 - 使用安全路径
+        safe_output_file = self._make_safe_path(output_file)
+        cmd.append(safe_output_file)
         
         return cmd
     
@@ -317,15 +383,19 @@ class FFmpegManager:
         
         cmd = [self.ffmpeg_path]
         
-        # 添加GPU加速参数
-        gpu_args = self.gpu_detector.get_gpu_acceleration_args(gpu_mode)
+        # 添加GPU加速参数（包含高级优化）
+        gpu_args = self.gpu_detector.get_gpu_acceleration_args(gpu_mode, advanced=True)
         cmd.extend(gpu_args)
         
-        # 输入文件
-        cmd.extend(["-i", input_file])
+        # 输入文件 - 使用安全路径
+        safe_input_file = self._make_safe_path(input_file)
+        cmd.extend(["-i", safe_input_file])
         
-        # 字幕滤镜
-        subtitle_filter = f"subtitles='{subtitle_file}':force_style='FontSize={font_size},PrimaryColour=&H{self._color_to_hex(font_color)}'"
+        # 字幕滤镜 - 使用安全路径，并转义特殊字符
+        safe_subtitle_file = self._make_safe_path(subtitle_file)
+        # 对于字幕文件路径，需要特殊处理反斜杠和单引号
+        escaped_subtitle_path = safe_subtitle_file.replace("\\", "/").replace("'", "\\'")
+        subtitle_filter = f"subtitles='{escaped_subtitle_path}':force_style='FontSize={font_size},PrimaryColour=&H{self._color_to_hex(font_color)}'"
         cmd.extend(["-vf", subtitle_filter])
         
         # 编码器设置
@@ -338,8 +408,9 @@ class FFmpegManager:
         # 音频编码
         cmd.extend(["-c:a", "copy"])
         
-        # 输出文件
-        cmd.append(output_file)
+        # 输出文件 - 使用安全路径
+        safe_output_file = self._make_safe_path(output_file)
+        cmd.append(safe_output_file)
         
         return cmd
     
@@ -354,15 +425,22 @@ class FFmpegManager:
         Returns:
             质量参数列表
         """
-        if gpu_mode in ["cuda", "amd"]:
-            # GPU编码器质量设置
+        if gpu_mode == "cuda":
+            # NVIDIA GPU编码器质量设置 - 使用比特率控制获得更好效果
             quality_map = {
-                "low": ["-preset", "fast", "-crf", "28"],
-                "medium": ["-preset", "medium", "-crf", "23"],
-                "high": ["-preset", "slow", "-crf", "18"]
+                "low": ["-preset", "fast", "-b:v", "3M"],
+                "medium": ["-preset", "medium", "-b:v", "5M"], 
+                "high": ["-preset", "slow", "-b:v", "8M"]
+            }
+        elif gpu_mode == "amd":
+            # AMD GPU编码器质量设置
+            quality_map = {
+                "low": ["-b:v", "3M"],
+                "medium": ["-b:v", "5M"],
+                "high": ["-b:v", "8M"]
             }
         else:
-            # CPU编码器质量设置
+            # CPU编码器质量设置 - 使用CRF获得更好的压缩效率
             quality_map = {
                 "low": ["-preset", "fast", "-crf", "28"],
                 "medium": ["-preset", "medium", "-crf", "23"],

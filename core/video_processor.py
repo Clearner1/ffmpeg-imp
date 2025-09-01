@@ -87,11 +87,11 @@ class VideoProcessor:
             self.progress = ProcessProgress()
             self._stop_event.clear()
             
-            # 添加进度输出参数
+            # 不使用-progress，直接从stderr读取进度信息
             command_with_progress = command.copy()
-            if "-progress" not in command_with_progress:
-                # 添加进度输出参数
-                command_with_progress.extend(["-progress", "pipe:1", "-nostats"])
+            # 移除可能存在的-nostats参数，我们需要stats来显示进度
+            if "-nostats" in command_with_progress:
+                command_with_progress.remove("-nostats")
             
             # 启动FFmpeg进程
             self.process = subprocess.Popen(
@@ -130,12 +130,13 @@ class VideoProcessor:
             return
         
         try:
-            # 读取进度信息
+            # 读取进度信息（从stderr）
             while self.process.poll() is None and not self._stop_event.is_set():
-                if self.process.stdout:
-                    line = self.process.stdout.readline()
+                if self.process.stderr:
+                    line = self.process.stderr.readline()
                     if line:
-                        self._parse_progress_line(line.strip())
+                        line_stripped = line.strip()
+                        self._parse_progress_line(line_stripped)
                 
                 # 检查是否需要停止
                 if self._stop_event.is_set():
@@ -154,10 +155,9 @@ class VideoProcessor:
                         self.status_callback(self.status, f"{self.current_task}完成")
                 else:
                     self.status = ProcessStatus.ERROR
-                    # 读取错误信息
-                    if self.process.stderr:
-                        error_output = self.process.stderr.read()
-                        self.error_message = self._extract_error_message(error_output)
+                    # 错误信息已在监控过程中收集，或使用返回码
+                    if not self.error_message:
+                        self.error_message = f"FFmpeg进程退出，返回码: {return_code}"
                     
                     if self.status_callback:
                         self.status_callback(self.status, f"{self.current_task}失败: {self.error_message}")
@@ -180,52 +180,89 @@ class VideoProcessor:
             line: 输出行内容
         """
         try:
+            # 检查是否是错误信息
+            if any(error_keyword in line.lower() for error_keyword in ['error', 'failed', 'invalid', 'could not']):
+                if not self.error_message:  # 只记录第一个错误
+                    self.error_message = line
+                return
+            
             # FFmpeg进度输出格式示例:
             # frame=  123 fps= 25 q=28.0 size=    1024kB time=00:00:05.00 bitrate=1677.7kbits/s speed=1.23x
             
-            # 解析时间进度
-            time_match = re.search(r'time=(\d{2}:\d{2}:\d{2}\.\d{2})', line)
-            if time_match:
-                self.progress.time_processed = time_match.group(1)
+            # 只解析包含实际进度信息的行
+            if not any(keyword in line for keyword in ['frame=', 'time=', 'size=', 'bitrate=']):
+                return
             
-            # 解析速度
-            speed_match = re.search(r'speed=\s*([0-9.]+)x', line)
-            if speed_match:
-                self.progress.speed = f"{speed_match.group(1)}x"
+            # 解析时间进度 - 处理N/A和正常时间格式
+            if 'time=N/A' in line:
+                # 时间未知，不更新时间
+                pass
+            else:
+                time_match = re.search(r'time=(\d{1,2}:\d{2}:\d{2}(?:\.\d{2})?)', line)
+                if time_match:
+                    self.progress.time_processed = time_match.group(1)
+                    # 确保时间格式标准化
+                    if '.' not in self.progress.time_processed:
+                        self.progress.time_processed += '.00'
             
-            # 解析比特率
-            bitrate_match = re.search(r'bitrate=\s*([0-9.]+)kbits/s', line)
+            # 解析速度 - 处理N/A和正常速度
+            if 'speed=N/A' in line:
+                self.progress.speed = "N/A"
+            else:
+                speed_match = re.search(r'speed=\s*([0-9.]+)x', line)
+                if speed_match:
+                    self.progress.speed = f"{speed_match.group(1)}x"
+            
+            # 解析比特率 - 支持不同单位
+            bitrate_match = re.search(r'bitrate=\s*([0-9.]+)(k?bits/s)', line)
             if bitrate_match:
-                self.progress.bitrate = f"{bitrate_match.group(1)} kbits/s"
+                value = bitrate_match.group(1)
+                unit = bitrate_match.group(2)
+                self.progress.bitrate = f"{value} {unit}"
             
             # 解析帧率
             fps_match = re.search(r'fps=\s*([0-9.]+)', line)
             if fps_match:
-                self.progress.fps = float(fps_match.group(1))
+                try:
+                    self.progress.fps = float(fps_match.group(1))
+                except ValueError:
+                    pass
             
             # 解析当前帧数
             frame_match = re.search(r'frame=\s*(\d+)', line)
             if frame_match:
-                self.progress.current_frame = int(frame_match.group(1))
+                try:
+                    self.progress.current_frame = int(frame_match.group(1))
+                except ValueError:
+                    pass
             
             # 计算百分比（需要总时长信息）
-            if hasattr(self, '_total_duration_seconds') and self._total_duration_seconds > 0:
-                current_seconds = self._time_to_seconds(self.progress.time_processed)
-                self.progress.percentage = min(100.0, (current_seconds / self._total_duration_seconds) * 100.0)
+            if (hasattr(self, '_total_duration_seconds') and 
+                self._total_duration_seconds > 0 and 
+                self.progress.time_processed):
                 
-                # 计算预计剩余时间
-                if current_seconds > 0 and self.progress.percentage > 0:
-                    speed_value = float(self.progress.speed.replace('x', '')) if 'x' in self.progress.speed else 1.0
-                    if speed_value > 0:
-                        remaining_seconds = (self._total_duration_seconds - current_seconds) / speed_value
-                        self.progress.eta = self._seconds_to_time(int(remaining_seconds))
+                current_seconds = self._time_to_seconds(self.progress.time_processed)
+                if current_seconds > 0:
+                    self.progress.percentage = min(100.0, (current_seconds / self._total_duration_seconds) * 100.0)
+                    
+                    # 计算预计剩余时间
+                    if self.progress.percentage > 0 and self.progress.speed:
+                        try:
+                            speed_value = float(self.progress.speed.replace('x', ''))
+                            if speed_value > 0:
+                                remaining_seconds = (self._total_duration_seconds - current_seconds) / speed_value
+                                self.progress.eta = self._seconds_to_time(int(remaining_seconds))
+                        except (ValueError, ZeroDivisionError):
+                            pass
             
-            # 触发进度回调
-            if self.progress_callback:
+            # 触发进度回调（只在有实际进度更新时）
+            if (self.progress_callback and 
+                (self.progress.time_processed or self.progress.current_frame > 0)):
                 self.progress_callback(self.progress)
                 
         except Exception as e:
-            print(f"解析进度行失败: {e}")
+            # 不要因为解析错误而中断处理
+            pass
     
     def _time_to_seconds(self, time_str: str) -> float:
         """
