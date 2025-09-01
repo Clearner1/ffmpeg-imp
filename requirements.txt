@@ -1,0 +1,32 @@
+# FFmpeg视频处理工具依赖包
+
+# 核心GUI库 (通常随Python一起安装)
+# tkinter - 内置GUI库，无需额外安装
+
+# 其他可选依赖 (用于增强功能)
+# 如果需要更高级的GUI功能，可以选择安装以下包之一：
+
+# PyQt5 - 更强大的GUI框架 (可选)
+# PyQt5>=5.15.0
+
+# PySide2 - Qt的官方Python绑定 (可选)  
+# PySide2>=5.15.0
+
+# 开发和测试工具 (可选)
+# pytest>=6.0.0          # 单元测试
+# pytest-cov>=2.0.0      # 测试覆盖率
+# flake8>=3.8.0          # 代码风格检查
+# black>=21.0.0          # 代码格式化
+
+# 注意事项:
+# 1. 本项目主要使用Python标准库，无需安装额外依赖
+# 2. 需要单独安装FFmpeg: https://ffmpeg.org/download.html
+# 3. tkinter在大多数Python安装中都包含，如果缺失请安装：
+#    - Windows: 重新安装Python并勾选"tcl/tk and IDLE"
+#    - Ubuntu/Debian: sudo apt-get install python3-tk
+#    - CentOS/RHEL: sudo yum install tkinter
+#    - macOS: 通常已包含，如果缺失可通过Homebrew安装Python
+
+# GPU加速支持:
+# - NVIDIA GPU: 需要安装CUDA驱动和NVIDIA编译版本的FFmpeg
+# - AMD GPU: 需要安装AMD驱动和支持AMF/OpenCL的FFmpeg版本
